@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use swc_common::{SourceMap, sync::Lrc};
-use swc_ecma_ast::{Callee, Expr, Module, Stmt, ModuleItem};
+use swc_ecma_ast::{Callee, Expr, Module, ModuleItem, Stmt};
+use swc_ecma_codegen::{Config, Emitter, text_writer::JsWriter};
 use swc_ecma_parser::{Lexer, Parser, StringInput, Syntax};
 use swc_ecma_visit::{Visit, VisitWith};
-use swc_ecma_codegen::{Emitter, text_writer::JsWriter, Config};
 
-// fn match_sig(module: Module) 
+// fn match_sig(module: Module)
 type Matcher = fn(Box<Expr>) -> Option<Box<Expr>>;
 #[derive(Clone, Debug)]
 struct Variable {
@@ -24,7 +24,13 @@ struct Analyzer {
 
 impl Analyzer {
     fn new(module: Module, matchers: Vec<Matcher>) -> Self {
-        Analyzer { module, variables: Default::default(), pending_dependents: Default::default(), matchers, matched_vars: Vec::new() }
+        Analyzer {
+            module,
+            variables: Default::default(),
+            pending_dependents: Default::default(),
+            matchers,
+            matched_vars: Vec::new(),
+        }
     }
 
     fn extract_dependencies(&self, expr: &Expr) -> HashSet<String> {
@@ -117,18 +123,16 @@ impl Analyzer {
                     }
                 }
             }
-            Expr::Arrow(arrow) => {
-                match &*arrow.body {
-                    swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
-                        for stmt in &block.stmts {
-                            self.extract_stmt_dependencies(stmt, deps);
-                        }
-                    }
-                    swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
-                        self.extract_dependencies_recursive(expr, deps);
+            Expr::Arrow(arrow) => match &*arrow.body {
+                swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
+                    for stmt in &block.stmts {
+                        self.extract_stmt_dependencies(stmt, deps);
                     }
                 }
-            }
+                swc_ecma_ast::BlockStmtOrExpr::Expr(expr) => {
+                    self.extract_dependencies_recursive(expr, deps);
+                }
+            },
             Expr::Paren(paren) => {
                 self.extract_dependencies_recursive(&paren.expr, deps);
             }
@@ -161,21 +165,25 @@ impl Analyzer {
             Stmt::Labeled(labeled) => {
                 self.extract_stmt_dependencies(&labeled.body, deps);
             }
-            Stmt::Decl(decl) => {
-                match decl {
-                    swc_ecma_ast::Decl::Var(var_decl) => {
-                        for decl in &var_decl.decls {
-                            if let Some(init) = &decl.init {
-                                println!("DEBUG: Extracting dependencies from var decl init: {:?}", init);
-                                self.extract_dependencies_recursive(init, deps);
-                            }
+            Stmt::Decl(decl) => match decl {
+                swc_ecma_ast::Decl::Var(var_decl) => {
+                    for decl in &var_decl.decls {
+                        if let Some(init) = &decl.init {
+                            println!(
+                                "DEBUG: Extracting dependencies from var decl init: {:?}",
+                                init
+                            );
+                            self.extract_dependencies_recursive(init, deps);
                         }
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             _ => {
-                println!("DEBUG: Unhandled statement in dependency extraction: {:?}", stmt);   
+                println!(
+                    "DEBUG: Unhandled statement in dependency extraction: {:?}",
+                    stmt
+                );
             }
         }
     }
@@ -219,7 +227,11 @@ impl Analyzer {
 
     fn matches(&self, var: &Variable) -> Option<(usize, Box<Expr>)> {
         for (idx, matcher) in self.matchers.iter().enumerate() {
-            if let Some(export_expr) = matcher(var.assigned_to.clone().expect("should have checked already")) {
+            if let Some(export_expr) = matcher(
+                var.assigned_to
+                    .clone()
+                    .expect("should have checked already"),
+            ) {
                 return Some((idx, export_expr));
             }
         }
@@ -228,17 +240,15 @@ impl Analyzer {
 
     fn assign_target_to_expr(&self, target: &swc_ecma_ast::AssignTarget) -> Option<Expr> {
         match target {
-            swc_ecma_ast::AssignTarget::Simple(simple) => {
-                match simple {
-                    swc_ecma_ast::SimpleAssignTarget::Ident(ident) => {
-                        Some(Expr::Ident(ident.id.clone()))
-                    }
-                    swc_ecma_ast::SimpleAssignTarget::Member(member) => {
-                        Some(Expr::Member(member.clone()))
-                    }
-                    _ => None,
+            swc_ecma_ast::AssignTarget::Simple(simple) => match simple {
+                swc_ecma_ast::SimpleAssignTarget::Ident(ident) => {
+                    Some(Expr::Ident(ident.id.clone()))
                 }
-            }
+                swc_ecma_ast::SimpleAssignTarget::Member(member) => {
+                    Some(Expr::Member(member.clone()))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -248,7 +258,7 @@ impl Analyzer {
             return;
         }
         collected.insert(var_name.to_string());
-        
+
         if let Some(var) = self.variables.get(var_name) {
             for dep in &var.dependencies {
                 // Recursively collect all dependencies, including member expressions like g.bj
@@ -264,7 +274,7 @@ impl Analyzer {
         let mut sorted = Vec::new();
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
-        
+
         fn visit(
             analyzer: &Analyzer,
             var_name: &str,
@@ -280,9 +290,9 @@ impl Analyzer {
                 // Circular dependency, skip
                 return;
             }
-            
+
             visiting.insert(var_name.to_string());
-            
+
             // Visit dependencies first
             if let Some(var) = analyzer.variables.get(var_name) {
                 for dep in &var.dependencies {
@@ -291,17 +301,24 @@ impl Analyzer {
                     }
                 }
             }
-            
+
             visiting.remove(var_name);
             visited.insert(var_name.to_string());
             sorted.push(var_name.to_string());
         }
-        
+
         // Visit all variables
         for var_name in vars {
-            visit(self, var_name, vars, &mut visited, &mut visiting, &mut sorted);
+            visit(
+                self,
+                var_name,
+                vars,
+                &mut visited,
+                &mut visiting,
+                &mut sorted,
+            );
         }
-        
+
         sorted
     }
 
@@ -311,12 +328,13 @@ impl Analyzer {
         for (matched, matcher_idx, export_expr) in &self.matched_vars {
             // Only collect dependencies if the export expression is not a literal value
             // For literals (like timestamp = 20430), we don't need any dependencies
-            let is_literal = matches!(**export_expr, 
-                Expr::Lit(_) | 
-                Expr::Ident(_) // Simple identifiers like VyG don't need their variable definition's deps
+            let is_literal = matches!(
+                **export_expr,
+                Expr::Lit(_) | Expr::Ident(_) // Simple identifiers like VyG don't need their variable definition's deps
             );
-            
-            if !is_literal || *matcher_idx == 1 { // nsigFn needs VyG's dependencies
+
+            if !is_literal || *matcher_idx == 1 {
+                // nsigFn needs VyG's dependencies
                 self.collect_all_dependencies(matched, &mut all_vars);
             }
         }
@@ -329,14 +347,14 @@ impl Analyzer {
         // Map matcher index to function name and export expression
         let function_names = ["sigFn", "nsigFn", "timestamp"];
         let mut matched_exports: HashMap<usize, Box<Expr>> = HashMap::new();
-        
+
         for (_, matcher_idx, export_expr) in &self.matched_vars {
             matched_exports.insert(*matcher_idx, export_expr.clone());
         }
 
         // Create a new module with just the variables we need
         let mut stmts = Vec::new();
-        
+
         for var_name in &sorted_vars {
             if let Some(var) = self.variables.get(var_name) {
                 if let Some(expr) = &var.assigned_to {
@@ -346,23 +364,26 @@ impl Analyzer {
                         let parts: Vec<&str> = var_name.split('.').collect();
                         if parts.len() >= 2 {
                             // Build the member expression from parts
-                            let mut member_expr: Box<Expr> = Box::new(Expr::Ident(swc_ecma_ast::Ident::new(
-                                parts[0].into(),
-                                swc_common::DUMMY_SP,
-                                Default::default()
-                            )));
-                            
+                            let mut member_expr: Box<Expr> =
+                                Box::new(Expr::Ident(swc_ecma_ast::Ident::new(
+                                    parts[0].into(),
+                                    swc_common::DUMMY_SP,
+                                    Default::default(),
+                                )));
+
                             for i in 1..parts.len() {
                                 member_expr = Box::new(Expr::Member(swc_ecma_ast::MemberExpr {
                                     span: swc_common::DUMMY_SP,
                                     obj: member_expr,
-                                    prop: swc_ecma_ast::MemberProp::Ident(swc_ecma_ast::IdentName::new(
-                                        parts[i].into(),
-                                        swc_common::DUMMY_SP,
-                                    )),
+                                    prop: swc_ecma_ast::MemberProp::Ident(
+                                        swc_ecma_ast::IdentName::new(
+                                            parts[i].into(),
+                                            swc_common::DUMMY_SP,
+                                        ),
+                                    ),
                                 }));
                             }
-                            
+
                             let assign_stmt = swc_ecma_ast::Stmt::Expr(swc_ecma_ast::ExprStmt {
                                 span: swc_common::DUMMY_SP,
                                 expr: Box::new(Expr::Assign(swc_ecma_ast::AssignExpr {
@@ -373,8 +394,8 @@ impl Analyzer {
                                             match *member_expr {
                                                 Expr::Member(m) => m,
                                                 _ => continue,
-                                            }
-                                        )
+                                            },
+                                        ),
                                     ),
                                     right: expr.clone(),
                                 })),
@@ -383,8 +404,8 @@ impl Analyzer {
                         }
                     } else {
                         // For regular variables, create a variable declaration
-                        let var_decl = swc_ecma_ast::Stmt::Decl(
-                            swc_ecma_ast::Decl::Var(Box::new(swc_ecma_ast::VarDecl {
+                        let var_decl = swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::Var(Box::new(
+                            swc_ecma_ast::VarDecl {
                                 span: swc_common::DUMMY_SP,
                                 kind: swc_ecma_ast::VarDeclKind::Var,
                                 declare: false,
@@ -394,7 +415,7 @@ impl Analyzer {
                                         id: swc_ecma_ast::Ident::new(
                                             var_name.clone().into(),
                                             swc_common::DUMMY_SP,
-                                            Default::default()
+                                            Default::default(),
                                         ),
                                         type_ann: None,
                                     }),
@@ -402,8 +423,8 @@ impl Analyzer {
                                     definite: false,
                                 }],
                                 ctxt: Default::default(),
-                            }))
-                        );
+                            },
+                        )));
                         stmts.push(var_decl);
                     }
                 }
@@ -418,7 +439,7 @@ impl Analyzer {
                 let value = if matcher_idx == 0 || matcher_idx == 1 {
                     // Create arrow function: (param) => exportExpr(param) or (param) => exportExpr
                     let param_name = if matcher_idx == 0 { "O" } else { "m" }; // Use common param names
-                    
+
                     // For sigFn, we need to wrap YU(1, decodeURIComponent(O)) call with param
                     // For nsigFn, we need to call VyG(param)
                     let call_expr = if matcher_idx == 0 {
@@ -436,15 +457,15 @@ impl Analyzer {
                                             swc_ecma_ast::Ident::new(
                                                 "decodeURIComponent".into(),
                                                 swc_common::DUMMY_SP,
-                                                Default::default()
-                                            )
+                                                Default::default(),
+                                            ),
                                         ))),
                                         args: vec![swc_ecma_ast::ExprOrSpread {
                                             spread: None,
                                             expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new(
                                                 param_name.into(),
                                                 swc_common::DUMMY_SP,
-                                                Default::default()
+                                                Default::default(),
                                             ))),
                                         }],
                                         type_args: None,
@@ -467,13 +488,15 @@ impl Analyzer {
                             Box::new(Expr::Call(swc_ecma_ast::CallExpr {
                                 span: swc_common::DUMMY_SP,
                                 ctxt: Default::default(),
-                                callee: swc_ecma_ast::Callee::Expr(Box::new(Expr::Ident(ident.clone()))),
+                                callee: swc_ecma_ast::Callee::Expr(Box::new(Expr::Ident(
+                                    ident.clone(),
+                                ))),
                                 args: vec![swc_ecma_ast::ExprOrSpread {
                                     spread: None,
                                     expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new(
                                         param_name.into(),
                                         swc_common::DUMMY_SP,
-                                        Default::default()
+                                        Default::default(),
                                     ))),
                                 }],
                                 type_args: None,
@@ -482,7 +505,7 @@ impl Analyzer {
                             export_expr.clone()
                         }
                     };
-                    
+
                     Box::new(Expr::Arrow(swc_ecma_ast::ArrowExpr {
                         span: swc_common::DUMMY_SP,
                         ctxt: Default::default(),
@@ -490,7 +513,7 @@ impl Analyzer {
                             id: swc_ecma_ast::Ident::new(
                                 param_name.into(),
                                 swc_common::DUMMY_SP,
-                                Default::default()
+                                Default::default(),
                             ),
                             type_ann: None,
                         })],
@@ -504,7 +527,7 @@ impl Analyzer {
                     // For timestamp, just use the value directly
                     export_expr.clone()
                 };
-                
+
                 let prop = swc_ecma_ast::PropOrSpread::Prop(Box::new(
                     swc_ecma_ast::Prop::KeyValue(swc_ecma_ast::KeyValueProp {
                         key: swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(
@@ -512,7 +535,7 @@ impl Analyzer {
                             swc_common::DUMMY_SP,
                         )),
                         value,
-                    })
+                    }),
                 ));
                 return_props.push(prop);
             }
@@ -536,7 +559,7 @@ impl Analyzer {
                     id: swc_ecma_ast::Ident::new(
                         "g".into(),
                         swc_common::DUMMY_SP,
-                        Default::default()
+                        Default::default(),
                     ),
                     type_ann: None,
                 }),
@@ -560,13 +583,15 @@ impl Analyzer {
             expr: Box::new(Expr::Call(swc_ecma_ast::CallExpr {
                 span: swc_common::DUMMY_SP,
                 ctxt: Default::default(),
-                callee: swc_ecma_ast::Callee::Expr(Box::new(Expr::Paren(swc_ecma_ast::ParenExpr {
-                    span: swc_common::DUMMY_SP,
-                    expr: Box::new(Expr::Fn(swc_ecma_ast::FnExpr {
-                        ident: None,
-                        function: Box::new(func),
-                    })),
-                }))),
+                callee: swc_ecma_ast::Callee::Expr(Box::new(Expr::Paren(
+                    swc_ecma_ast::ParenExpr {
+                        span: swc_common::DUMMY_SP,
+                        expr: Box::new(Expr::Fn(swc_ecma_ast::FnExpr {
+                            ident: None,
+                            function: Box::new(func),
+                        })),
+                    },
+                ))),
                 args: vec![swc_ecma_ast::ExprOrSpread {
                     spread: None,
                     expr: Box::new(Expr::Object(swc_ecma_ast::ObjectLit {
@@ -636,8 +661,9 @@ impl Analyzer {
                             match stmt.expr.as_ref() {
                                 Expr::Assign(assign) => {
                                     // Handle variable assignment
-                                    if let Some(name) = assign.left.as_ident().map(|id| id.sym.to_string()) {
-                                        
+                                    if let Some(name) =
+                                        assign.left.as_ident().map(|id| id.sym.to_string())
+                                    {
                                         let assigned_expr = assign.right.clone();
                                         if self.variables.contains_key(&name) {
                                             let deps = self.extract_dependencies(&assign.right);
@@ -650,14 +676,19 @@ impl Analyzer {
                                             let matches = self.matches(var);
                                             if let Some((matcher_idx, export_expr)) = matches {
                                                 println!("Match found for variable: {}", name);
-                                                self.matched_vars.push((name.clone(), matcher_idx, export_expr));
+                                                self.matched_vars.push((
+                                                    name.clone(),
+                                                    matcher_idx,
+                                                    export_expr,
+                                                ));
                                                 // return;
                                             }
                                         }
-                                        
                                     }
                                     // Handle member expression assignment
-                                    if let Some(left_expr) = self.assign_target_to_expr(&assign.left) {
+                                    if let Some(left_expr) =
+                                        self.assign_target_to_expr(&assign.left)
+                                    {
                                         if let Some(name) = self.member_to_string(&left_expr) {
                                             let deps = self.extract_dependencies(&assign.right);
                                             if let Some(var) = self.variables.get_mut(&name) {
@@ -667,40 +698,54 @@ impl Analyzer {
                                             // println!("Member assigned: {}", name);
                                             let base = self.member_base_name(&left_expr);
                                             if let Some(base_name) = base {
-                                                if base_name != name && !base_name.starts_with("this.") {
-                                                    if let Some(var) = self.variables.get_mut(&name) {
-                                                        var.dependencies.insert(base_name.replace(".prototype", ""));
+                                                if base_name != name
+                                                    && !base_name.starts_with("this.")
+                                                {
+                                                    if let Some(var) = self.variables.get_mut(&name)
+                                                    {
+                                                        var.dependencies.insert(
+                                                            base_name.replace(".prototype", ""),
+                                                        );
                                                     }
                                                 }
                                             }
                                             if self.pending_dependents.contains_key(&name) {
                                                 self.pending_dependents.remove(&name);
                                             }
-                                            self.variables.insert(name.clone(), Variable {
-                                                assigned_to: Some(assign.right.clone()),
-                                                dependencies: deps,
-                                            });
+                                            self.variables.insert(
+                                                name.clone(),
+                                                Variable {
+                                                    assigned_to: Some(assign.right.clone()),
+                                                    dependencies: deps,
+                                                },
+                                            );
                                         }
                                     }
                                 }
                                 _ => {
                                     // Ignore
                                 }
-
                             }
                         }
                         Stmt::Decl(decl) => {
                             match decl {
                                 swc_ecma_ast::Decl::Var(var_decl) => {
                                     for decl in &var_decl.decls {
-                                        if let Some(name) = decl.name.as_ident().map(|id| id.sym.to_string()) {
-                                            let deps = decl.init.as_ref().map_or(HashSet::new(), |init| self.extract_dependencies(init));
+                                        if let Some(name) =
+                                            decl.name.as_ident().map(|id| id.sym.to_string())
+                                        {
+                                            let deps =
+                                                decl.init.as_ref().map_or(HashSet::new(), |init| {
+                                                    self.extract_dependencies(init)
+                                                });
                                             let mut var = Variable {
                                                 assigned_to: decl.init.clone(),
                                                 dependencies: deps,
                                             };
                                             // Check for pending dependents
-                                            if let Some(_dependents) = self.pending_dependents.remove(&name) {
+                                            if let Some(_dependents) =
+                                                self.pending_dependents.remove(&name)
+                                            {
                                                 var.dependencies.insert(name.clone());
                                             }
                                             self.variables.insert(name.clone(), var.clone());
@@ -708,7 +753,11 @@ impl Analyzer {
                                                 let matches = self.matches(&var);
                                                 if let Some((matcher_idx, export_expr)) = matches {
                                                     println!("Match found in IIFE body: {}", name);
-                                                    self.matched_vars.push((name.clone(), matcher_idx, export_expr));
+                                                    self.matched_vars.push((
+                                                        name.clone(),
+                                                        matcher_idx,
+                                                        export_expr,
+                                                    ));
                                                     // return;
                                                 }
                                             }
@@ -729,7 +778,6 @@ impl Analyzer {
             None => {
                 println!("IIFE has no body");
             }
-
         }
     }
 }
@@ -756,7 +804,6 @@ impl Visit for TimestampVisitor {
             }
         }
     }
-
 }
 impl TimestampVisitor {
     fn found(&self) -> Option<Box<Expr>> {
@@ -770,54 +817,66 @@ impl TimestampVisitor {
 fn main() {
     // read the file "ab89db3f.js"
     let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.load_file(std::path::Path::new("ab89db3f.js")).expect("failed to load file");
+    let fm = cm
+        .load_file(std::path::Path::new("ab89db3f.js"))
+        .expect("failed to load file");
     println!("File loaded: {:?}", fm);
 
-    let lexer = Lexer::new(Syntax::Es(Default::default()), Default::default(), StringInput::from(&*fm), None);
+    let lexer = Lexer::new(
+        Syntax::Es(Default::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
     let mut parser = Parser::new_from(lexer);
     let module = parser.parse_module().expect("failed to parse module");
     // println!("Parsed module: {:?}", module);
-    let mut analyzer = Analyzer::new(module, vec![
-        // matcher for sig function
-        |expr| {
-            // 1. Check if expr is a var declaration
-            if let Expr::Fn(fun) = *expr // var a = function() { ... }
-            && fun.function.params.len() == 3 // var a = function(x, y, z) { ... }
-            {
-                // println!("Found function with 3 params");
-                let param3 = &fun.function.params[2];
-                if let swc_ecma_ast::Pat::Ident(ident) = &param3.pat {
-                    let _id = ident.id.sym.to_string();
-                    // println!("Found function with third param: {}", id);
-                    if let Some(body) = &fun.function.body {
-                        for stmt in &body.stmts {
-                            // println!("Checking statement: {:?}", stmt);
-                            if let Stmt::Expr(expr) = stmt
-                            && let Expr::Bin(bin) = &*expr.expr
-                            && bin.op == swc_ecma_ast::BinaryOp::LogicalAnd
-                            && let Expr::Paren(expr) = bin.right.as_ref()
-                            && let Expr::Seq(expr) = &*expr.expr
-                            && let Some(first) = expr.exprs.get(0)
-                            && let Expr::Assign(assign) = first.as_ref()
-                            && let Expr::Call(call) = &*assign.right
-                            {
-                                // println!("Found assignment with call expression : {:?}", call);
-                                let arg = call.args.iter().find(|arg| {
-                                    if let Expr::Call(call) = &*arg.expr {
-                                        if let Callee::Expr(callee_expr) = &call.callee {
-                                            if let Expr::Ident(ident) = &**callee_expr {
-                                                return ident.sym.to_string() == "decodeURIComponent";
+    let mut analyzer = Analyzer::new(
+        module,
+        vec![
+            // matcher for sig function
+            |expr| {
+                // 1. Check if expr is a var declaration
+                if let Expr::Fn(fun) = *expr // var a = function() { ... }
+            && fun.function.params.len() == 3
+                // var a = function(x, y, z) { ... }
+                {
+                    // println!("Found function with 3 params");
+                    let param3 = &fun.function.params[2];
+                    if let swc_ecma_ast::Pat::Ident(ident) = &param3.pat {
+                        let _id = ident.id.sym.to_string();
+                        // println!("Found function with third param: {}", id);
+                        if let Some(body) = &fun.function.body {
+                            for stmt in &body.stmts {
+                                // println!("Checking statement: {:?}", stmt);
+                                if let Stmt::Expr(expr) = stmt
+                                    && let Expr::Bin(bin) = &*expr.expr
+                                    && bin.op == swc_ecma_ast::BinaryOp::LogicalAnd
+                                    && let Expr::Paren(expr) = bin.right.as_ref()
+                                    && let Expr::Seq(expr) = &*expr.expr
+                                    && let Some(first) = expr.exprs.get(0)
+                                    && let Expr::Assign(assign) = first.as_ref()
+                                    && let Expr::Call(call) = &*assign.right
+                                {
+                                    // println!("Found assignment with call expression : {:?}", call);
+                                    let arg = call.args.iter().find(|arg| {
+                                        if let Expr::Call(call) = &*arg.expr {
+                                            if let Callee::Expr(callee_expr) = &call.callee {
+                                                if let Expr::Ident(ident) = &**callee_expr {
+                                                    return ident.sym.to_string()
+                                                        == "decodeURIComponent";
+                                                }
                                             }
                                         }
-                                    }
-                                    false
-                                });
-                                if arg.is_some() {
-                                    println!("Found call to decodeURIComponent");
-                                    // Return the call expression (YU(...)) instead of the assignment
-                                    if let Callee::Expr(callee) = &call.callee {
-                                        if let Expr::Ident(_ident) = &**callee {
-                                            return Some(Box::new(Expr::Call(call.clone())));
+                                        false
+                                    });
+                                    if arg.is_some() {
+                                        println!("Found call to decodeURIComponent");
+                                        // Return the call expression (YU(...)) instead of the assignment
+                                        if let Callee::Expr(callee) = &call.callee {
+                                            if let Expr::Ident(_ident) = &**callee {
+                                                return Some(Box::new(Expr::Call(call.clone())));
+                                            }
                                         }
                                     }
                                 }
@@ -825,35 +884,33 @@ fn main() {
                         }
                     }
                 }
-                
-            }
-            None
-        },
-
-        // matcher for nsig function
-        |expr| {
-            if let Expr::Array(array) = *expr &&
-            let Some(first) = array.elems.get(0) &&
-            let Some(first_expr) = first &&
-            let Expr::Ident(ident) = &*first_expr.expr {
-                println!("Found nsig first element ident: {}", ident.sym);
-                return Some(first_expr.expr.clone());
-            }
-            None
-        },
-
-        // matcher for timestamp
-        |expr| {
-            if let Expr::Fn(fun) = *expr {
-                let mut visitor = TimestampVisitor::new();
-                fun.visit_children_with(&mut visitor);
-                // Return the value of signatureTimestamp, not the whole function
-                visitor.found()
-            } else {
                 None
-            }
-        }
-    ]);
+            },
+            // matcher for nsig function
+            |expr| {
+                if let Expr::Array(array) = *expr
+                    && let Some(first) = array.elems.get(0)
+                    && let Some(first_expr) = first
+                    && let Expr::Ident(ident) = &*first_expr.expr
+                {
+                    println!("Found nsig first element ident: {}", ident.sym);
+                    return Some(first_expr.expr.clone());
+                }
+                None
+            },
+            // matcher for timestamp
+            |expr| {
+                if let Expr::Fn(fun) = *expr {
+                    let mut visitor = TimestampVisitor::new();
+                    fun.visit_children_with(&mut visitor);
+                    // Return the value of signatureTimestamp, not the whole function
+                    visitor.found()
+                } else {
+                    None
+                }
+            },
+        ],
+    );
     analyzer.walk_ast();
 
     // Render the matched functions and their dependencies to JavaScript
@@ -861,15 +918,13 @@ fn main() {
         Ok(js_code) => {
             println!("\n=== Generated JavaScript ===\n");
             println!("{}", js_code);
-            
+
             // Write to output file
-            std::fs::write("output_functions.js", &js_code)
-                .expect("Failed to write output file");
+            std::fs::write("output_functions.js", &js_code).expect("Failed to write output file");
             println!("\nOutput written to output_functions.js");
         }
         Err(e) => {
             eprintln!("Error generating JavaScript: {}", e);
         }
     }
-
 }
