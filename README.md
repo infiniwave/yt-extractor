@@ -1,2 +1,2 @@
-# yt-extractor
-YouTube signature AST extraction using Rust
+# YouTube extractor
+Extracts YouTube signature function using SWC AST utilities for Rust. Inspired by [youtubei.js](https://github.com/LuanRT/YouTube.js) for the AST matcher logic. This was from a couple hours of playing around, so the code is bad.
