@@ -1,12 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use swc_common::{SourceMap, sync::Lrc};
+use v8::{self, Local};
+use swc_common::{FileName, SourceMap, sync::Lrc};
 use swc_ecma_ast::{Callee, Expr, Module, ModuleItem, Stmt};
 use swc_ecma_codegen::{Config, Emitter, text_writer::JsWriter};
 use swc_ecma_parser::{Lexer, Parser, StringInput, Syntax};
 use swc_ecma_visit::{Visit, VisitWith};
+use once_cell::sync::OnceCell;
 
-// fn match_sig(module: Module)
+static V8_INITIALIZED: OnceCell<()> = OnceCell::new();
+
 type Matcher = fn(Box<Expr>) -> Option<Box<Expr>>;
 #[derive(Clone, Debug)]
 struct Variable {
@@ -42,9 +45,6 @@ impl Analyzer {
     fn extract_dependencies_recursive(&self, expr: &Expr, deps: &mut HashSet<String>) {
         match expr {
             Expr::Ident(ident) => {
-                if ident.sym.to_string() == "OoC" {
-                    println!("DEBUG: Found dependency on OoC");
-                }
                 deps.insert(ident.sym.to_string());
             }
             Expr::Member(member) => {
@@ -169,10 +169,10 @@ impl Analyzer {
                 swc_ecma_ast::Decl::Var(var_decl) => {
                     for decl in &var_decl.decls {
                         if let Some(init) = &decl.init {
-                            println!(
-                                "DEBUG: Extracting dependencies from var decl init: {:?}",
-                                init
-                            );
+                            // println!(
+                            //     "DEBUG: Extracting dependencies from var decl init: {:?}",
+                            //     init
+                            // );
                             self.extract_dependencies_recursive(init, deps);
                         }
                     }
@@ -180,10 +180,10 @@ impl Analyzer {
                 _ => {}
             },
             _ => {
-                println!(
-                    "DEBUG: Unhandled statement in dependency extraction: {:?}",
-                    stmt
-                );
+                // println!(
+                //     "DEBUG: Unhandled statement in dependency extraction: {:?}",
+                //     stmt
+                // );
             }
         }
     }
@@ -671,7 +671,6 @@ impl Analyzer {
                                             let var = self.variables.get_mut(&name).unwrap();
                                             var.assigned_to = Some(assigned_expr);
                                             var.dependencies.extend(deps);
-                                            // println!("Variable assigned: {}", name);
                                             let var = self.variables.get(&name).unwrap();
                                             let matches = self.matches(var);
                                             if let Some((matcher_idx, export_expr)) = matches {
@@ -681,7 +680,6 @@ impl Analyzer {
                                                     matcher_idx,
                                                     export_expr,
                                                 ));
-                                                // return;
                                             }
                                         }
                                     }
@@ -695,7 +693,6 @@ impl Analyzer {
                                                 var.assigned_to = Some(assign.right.clone());
                                                 var.dependencies.extend(deps.clone());
                                             }
-                                            // println!("Member assigned: {}", name);
                                             let base = self.member_base_name(&left_expr);
                                             if let Some(base_name) = base {
                                                 if base_name != name
@@ -758,7 +755,6 @@ impl Analyzer {
                                                         matcher_idx,
                                                         export_expr,
                                                     ));
-                                                    // return;
                                                 }
                                             }
                                         }
@@ -791,7 +787,6 @@ impl Visit for TimestampVisitor {
             if let swc_ecma_ast::PropOrSpread::Prop(prop) = prop {
                 match &**prop {
                     swc_ecma_ast::Prop::KeyValue(kv) => {
-                        // println!("Visiting ObjectLit: {:?}", node);
                         if let swc_ecma_ast::PropName::Ident(key) = &kv.key {
                             if key.sym.to_string() == "signatureTimestamp" {
                                 println!("Found signatureTimestamp: {:?}", kv.value);
@@ -814,68 +809,69 @@ impl TimestampVisitor {
     }
 }
 
-fn main() {
-    // read the file "ab89db3f.js"
-    let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm
-        .load_file(std::path::Path::new("ab89db3f.js"))
-        .expect("failed to load file");
-    println!("File loaded: {:?}", fm);
-
-    let lexer = Lexer::new(
-        Syntax::Es(Default::default()),
-        Default::default(),
-        StringInput::from(&*fm),
-        None,
-    );
-    let mut parser = Parser::new_from(lexer);
-    let module = parser.parse_module().expect("failed to parse module");
-    // println!("Parsed module: {:?}", module);
-    let mut analyzer = Analyzer::new(
-        module,
-        vec![
-            // matcher for sig function
-            |expr| {
-                // 1. Check if expr is a var declaration
-                if let Expr::Fn(fun) = *expr // var a = function() { ... }
-            && fun.function.params.len() == 3
-                // var a = function(x, y, z) { ... }
-                {
-                    // println!("Found function with 3 params");
-                    let param3 = &fun.function.params[2];
-                    if let swc_ecma_ast::Pat::Ident(ident) = &param3.pat {
-                        let _id = ident.id.sym.to_string();
-                        // println!("Found function with third param: {}", id);
-                        if let Some(body) = &fun.function.body {
-                            for stmt in &body.stmts {
-                                // println!("Checking statement: {:?}", stmt);
-                                if let Stmt::Expr(expr) = stmt
-                                    && let Expr::Bin(bin) = &*expr.expr
-                                    && bin.op == swc_ecma_ast::BinaryOp::LogicalAnd
-                                    && let Expr::Paren(expr) = bin.right.as_ref()
-                                    && let Expr::Seq(expr) = &*expr.expr
-                                    && let Some(first) = expr.exprs.get(0)
-                                    && let Expr::Assign(assign) = first.as_ref()
-                                    && let Expr::Call(call) = &*assign.right
-                                {
-                                    // println!("Found assignment with call expression : {:?}", call);
-                                    let arg = call.args.iter().find(|arg| {
-                                        if let Expr::Call(call) = &*arg.expr {
-                                            if let Callee::Expr(callee_expr) = &call.callee {
-                                                if let Expr::Ident(ident) = &**callee_expr {
-                                                    return ident.sym.to_string()
-                                                        == "decodeURIComponent";
+struct Deobfuscator {
+    js: String,
+}
+impl Deobfuscator {
+    fn new(js: String) -> Self {
+        let transformed_js = Self::transform(js);
+        Deobfuscator {
+            js: transformed_js,
+        }
+    }
+    fn transform(js: String) -> String {
+        let cm: Lrc<SourceMap> = Default::default();
+        let fm = cm.new_source_file(FileName::Custom("input.js".into()).into(), js);
+        let lexer = Lexer::new(
+            Syntax::Es(Default::default()),
+            Default::default(),
+            StringInput::from(&*fm),
+            None,
+        );
+        let mut parser = Parser::new_from(lexer);
+        let module = parser.parse_module().expect("failed to parse module");
+        let mut analyzer = Analyzer::new(
+            module,
+            vec![
+                // matcher for sig function
+                |expr| {
+                    // 1. Check if expr is a var declaration
+                    if let Expr::Fn(fun) = *expr // var a = function() { ... }
+                && fun.function.params.len() == 3
+                    // var a = function(x, y, z) { ... }
+                    {
+                        let param3 = &fun.function.params[2];
+                        if let swc_ecma_ast::Pat::Ident(ident) = &param3.pat {
+                            let _id = ident.id.sym.to_string();
+                            if let Some(body) = &fun.function.body {
+                                for stmt in &body.stmts {
+                                    if let Stmt::Expr(expr) = stmt
+                                        && let Expr::Bin(bin) = &*expr.expr
+                                        && bin.op == swc_ecma_ast::BinaryOp::LogicalAnd
+                                        && let Expr::Paren(expr) = bin.right.as_ref()
+                                        && let Expr::Seq(expr) = &*expr.expr
+                                        && let Some(first) = expr.exprs.get(0)
+                                        && let Expr::Assign(assign) = first.as_ref()
+                                        && let Expr::Call(call) = &*assign.right
+                                    {
+                                        let arg = call.args.iter().find(|arg| {
+                                            if let Expr::Call(call) = &*arg.expr {
+                                                if let Callee::Expr(callee_expr) = &call.callee {
+                                                    if let Expr::Ident(ident) = &**callee_expr {
+                                                        return ident.sym.to_string()
+                                                            == "decodeURIComponent";
+                                                    }
                                                 }
                                             }
-                                        }
-                                        false
-                                    });
-                                    if arg.is_some() {
-                                        println!("Found call to decodeURIComponent");
-                                        // Return the call expression (YU(...)) instead of the assignment
-                                        if let Callee::Expr(callee) = &call.callee {
-                                            if let Expr::Ident(_ident) = &**callee {
-                                                return Some(Box::new(Expr::Call(call.clone())));
+                                            false
+                                        });
+                                        if arg.is_some() {
+                                            println!("Found call to decodeURIComponent");
+                                            // Return the call expression (YU(...)) instead of the assignment
+                                            if let Callee::Expr(callee) = &call.callee {
+                                                if let Expr::Ident(_ident) = &**callee {
+                                                    return Some(Box::new(Expr::Call(call.clone())));
+                                                }
                                             }
                                         }
                                     }
@@ -883,48 +879,118 @@ fn main() {
                             }
                         }
                     }
-                }
-                None
-            },
-            // matcher for nsig function
-            |expr| {
-                if let Expr::Array(array) = *expr
-                    && let Some(first) = array.elems.get(0)
-                    && let Some(first_expr) = first
-                    && let Expr::Ident(ident) = &*first_expr.expr
-                {
-                    println!("Found nsig first element ident: {}", ident.sym);
-                    return Some(first_expr.expr.clone());
-                }
-                None
-            },
-            // matcher for timestamp
-            |expr| {
-                if let Expr::Fn(fun) = *expr {
-                    let mut visitor = TimestampVisitor::new();
-                    fun.visit_children_with(&mut visitor);
-                    // Return the value of signatureTimestamp, not the whole function
-                    visitor.found()
-                } else {
                     None
-                }
-            },
-        ],
-    );
-    analyzer.walk_ast();
+                },
+                // matcher for nsig function
+                |expr| {
+                    if let Expr::Array(array) = *expr
+                        && let Some(first) = array.elems.get(0)
+                        && let Some(first_expr) = first
+                        && let Expr::Ident(ident) = &*first_expr.expr
+                    {
+                        println!("Found nsig first element ident: {}", ident.sym);
+                        return Some(first_expr.expr.clone());
+                    }
+                    None
+                },
+                // matcher for timestamp
+                |expr| {
+                    if let Expr::Fn(fun) = *expr {
+                        let mut visitor = TimestampVisitor::new();
+                        fun.visit_children_with(&mut visitor);
+                        // Return the value of signatureTimestamp, not the whole function
+                        visitor.found()
+                    } else {
+                        None
+                    }
+                },
+            ],
+        );
+        analyzer.walk_ast();
 
-    // Render the matched functions and their dependencies to JavaScript
-    match analyzer.render_to_js(&cm) {
-        Ok(js_code) => {
-            println!("\n=== Generated JavaScript ===\n");
-            println!("{}", js_code);
-
-            // Write to output file
-            std::fs::write("output_functions.js", &js_code).expect("Failed to write output file");
-            println!("\nOutput written to output_functions.js");
-        }
-        Err(e) => {
-            eprintln!("Error generating JavaScript: {}", e);
+        // Render the matched functions and their dependencies to JavaScript
+        match analyzer.render_to_js(&cm) {
+            Ok(js_code) => {
+                println!("\n=== Generated JavaScript ===\n");
+                println!("{}", js_code);
+                return js_code;
+            }
+            Err(e) => {
+                eprintln!("Error generating JavaScript: {}", e);
+                panic!("Failed to generate JavaScript");
+            }
         }
     }
+
+
+    fn call_fn(&self, func: &str, input: &str) -> String {  
+        V8_INITIALIZED.get_or_init(|| {
+            let platform = v8::new_default_platform(0, false).make_shared();
+            v8::V8::initialize_platform(platform.clone());
+            v8::V8::initialize();
+            ()
+        });
+        let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &v8::ContextScope::new(handle_scope, context);
+        let code = v8::String::new(scope, &self.js).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        let result = script.run(scope).unwrap();
+        let func = v8::String::new(scope, func).unwrap();
+        let Some(obj) = result.to_object(scope) else {
+            panic!("Expected object from script execution");
+        };
+        let a = obj.get(scope, func.into()).expect("Failed to get fn");
+        let a_fn = Local::<v8::Function>::try_from(a).expect("fn is not a function");
+        let arg = v8::String::new(scope, &input).unwrap();
+        let undefined = v8::undefined(scope).into();
+        let result = a_fn.call(scope, undefined, &[arg.into()]).expect("Failed to call fn");
+        let result_str = result.to_string(scope).expect("Failed to convert result to string");
+        result_str.to_rust_string_lossy(scope)
+    }
+
+    fn gen_nsig(&self, input: &str) -> String {
+        self.call_fn("nsigFn", input)
+    }
+
+    fn gen_sig(&self, input: &str) -> String {
+        self.call_fn("sigFn", input)
+    }
+
+    fn get_timestamp(&self) -> u32 {
+        V8_INITIALIZED.get_or_init(|| {
+            let platform = v8::new_default_platform(0, false).make_shared();
+            v8::V8::initialize_platform(platform.clone());
+            v8::V8::initialize();
+            ()
+        });
+        let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &v8::ContextScope::new(handle_scope, context);
+        let code = v8::String::new(scope, &self.js).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        let result = script.run(scope).unwrap();
+        let Some(obj) = result.to_object(scope) else {
+            panic!("Expected object from script execution");
+        };
+        let timestamp_key = v8::String::new(scope, "timestamp").unwrap();
+        let timestamp_value = obj.get(scope, timestamp_key.into()).expect("Failed to get timestamp");
+        let timestamp_number = timestamp_value
+            .to_number(scope)
+            .expect("Failed to convert timestamp to number");
+        timestamp_number.value() as u32
+    }
+}
+
+fn main() {
+    let js = std::fs::read_to_string("input.js").expect("Failed to read input file");
+    let deobfuscator = Deobfuscator::new(js);
+    let nsig = deobfuscator.gen_nsig("6u9j9irLwEPo3aM");
+    let sig = deobfuscator.gen_sig("XLfLUIfbMtV2tyWX4QalkyTvb_-XVj3rg4N-9TYnJAfpEICULqTAnP4xeML0MvwChYonsJJfFbKxX1qptWmozzzY6KgIARwsSdQfJA");
+    println!("nsig result: {}", nsig);
+    println!("sig result: {}", sig);
+    let timestamp = deobfuscator.get_timestamp();
+    println!("timestamp result: {}", timestamp);
 }
